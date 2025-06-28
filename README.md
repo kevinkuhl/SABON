@@ -5,10 +5,10 @@ Official GitHub repository for **S**ingle **A**utoencoder **B**asis **O**perator
 ---
 
 ## 1 - What is SABON?
-A *single-autoencoder basis operator network* jointly learns  
+A *single autoencoder basis operator network* jointly learns  
 
-* a **basis** \(\{\phi_j\}_{j=1}^N\), and  
-* the **finite matrix representation** of that operator in that same basis.
+* a **basis** $\phi$, and  
+* the **finite matrix representation** of the PF/Koopman operators in that same basis.
 
 ---
 
@@ -54,7 +54,7 @@ python analysis.py \
   --output_dir ./results
 ```
 
-### 3.3  Perturbed-cat-map demo
+### 3.3  Perturbed cat-map demo
 
 ```bash
 cd examples/cat_map
