@@ -1,0 +1,39 @@
+# Training/validation split
+ntrain: 1000
+nvalid: 500
+ntest: 100
+
+# Model architecture
+nbasis: 30
+encoder_hidden: [2048, 2048, 2048, 2048, 2048]
+g_hidden: []
+
+# Optimisation
+batch_size: 100
+sub: 1
+learning_rate: 0.001
+epochs: 7500
+scheduler_step_size: 250
+gamma: 0.9
+
+# Activations
+activation_encoder: relu
+activation_g: identity
+
+# Regularisation / constraints
+lambda_in: 0.0
+lambda_out: 0.0
+lambda_sparse: 0.6
+lambda_inv: 0.0
+lambda_op: 1.0
+
+# Data augmentation
+linear_augment: false
+linear_augment_percentage: 0.6
+random_seed: 1
+
+base_path: /srv/scratch/z5547452/data_circle/TO_circle_rotation_2D-1600fs-100ps-9or-1.0alp
+
+# Runtime
+model_name: SABON
+device: cuda
