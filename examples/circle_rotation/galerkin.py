@@ -1,54 +1,42 @@
 import numpy as np
+import torch
 from scipy import linalg
 
 
-def galerkin_Lphi(
-    basis_matrices,
-    operator_action,
-    inner_product_weight=None,
-    normalize_eigenvectors=True,
-    return_left_vectors=False,
+def eigs(
+    model,
+    t_in,
+    normalize_eigenvectors: bool = True,
+    return_left_vectors: bool = False,
 ):
-    """
-    Parameters
-    ----------
-    basis_matrices      : sequence of arrays, φ_i(x) on the grid
-    operator_action     : sequence of arrays, Lφ_i(x) (same shapes as basis_matrices)
-    inner_product_weight: quadrature weights w(x) or None (defaults to ones)
-    normalize_eigenvectors : if True, scale right eigenvectors so vᴴ M v = 1
-    return_left_vectors : if True, also return the left eigenvectors
+    model.eval()
+    with torch.no_grad():
+        t_tensor = torch.as_tensor(
+            t_in,
+            dtype=torch.get_default_dtype(),
+            device=next(model.parameters()).device,
+        )
+        B = model.Encoder(t_tensor).cpu().numpy().T
 
-    Returns
-    -------
-    dict with
-        eigenvalues
-        eigenvectors
-        eigenfunctions
-        A, M
-        left_eigenvectors
-    """
-    if len(operator_action) != len(basis_matrices):
-        raise ValueError("operator_action must have the same length as basis_matrices.")
+    try:
+        w_flat = model.trap_w_flat.to(torch.float64).cpu().numpy()
+    except AttributeError as e:
+        raise AttributeError(
+            "The model must expose a tensor 'trap_w_flat' with quadrature weights."
+        ) from e
 
-    Ny, Nx = basis_matrices[0].shape
-    n_pts = Ny * Nx
+    M = (B * w_flat) @ B.T
 
-    B = np.stack([b.ravel() for b in basis_matrices], axis=1)
-    Lphi = np.stack([f.ravel() for f in operator_action], axis=1)
+    G_layer = model.G.layers[0]
 
-    w = (
-        np.ones(n_pts, float)
-        if inner_product_weight is None
-        else inner_product_weight.ravel().astype(float)
-    )
+    G = G_layer.weight.detach().cpu().numpy()
 
-    M = B.conj().T @ (w[:, None] * B)
-    A = B.conj().T @ (w[:, None] * Lphi)
+    A = G @ M
 
     if return_left_vectors:
-        eigvals, Lvecs, Rvecs = linalg.eig(A, M, left=True, right=True)
+        eigvals, Lvecs, Rvecs = linalg.eig(A, left=True, right=True)
     else:
-        eigvals, Rvecs = linalg.eig(A, M)
+        eigvals, Rvecs = linalg.eig(A)
 
     order = np.argsort(-np.abs(eigvals))
     eigvals = eigvals[order]
@@ -58,26 +46,23 @@ def galerkin_Lphi(
 
     if normalize_eigenvectors:
         mv = np.einsum("bi,ij,bi->b", Rvecs.conj().T, M, Rvecs).real
-        tiny = mv < 1e-12
-        if tiny.any():
-            print("zero / tiny vᴴMv for modes:", np.where(tiny)[0])
-            mv[tiny] = 1.0
-        Rvecs /= np.sqrt(mv)[None, :]
+        eps = 1e-14
+        Rvecs /= np.sqrt(np.maximum(mv, 0) + eps)[None, :]
         if return_left_vectors:
-            Lvecs /= mv[None, :]
+            Lvecs /= (mv + eps)[None, :]
 
-    basis_stack = np.stack(basis_matrices, axis=0)
-    eigfuncs = np.tensordot(Rvecs.T, basis_stack, axes=(1, 0))
+    eigfuncs = Rvecs.T @ B
 
-    out = dict(
-        eigenvalues=eigvals,
-        eigenvectors=Rvecs,
-        eigenfunctions=eigfuncs,
-        A=A,
-        M=M,
-    )
+    out = {
+        "eigenvalues": eigvals,
+        "eigenvectors": Rvecs,
+        "eigenfunctions": eigfuncs,
+        "A": A,
+        "M": M,
+    }
     if return_left_vectors:
         out["left_eigenvectors"] = Lvecs
+
     return out
 
 

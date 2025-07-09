@@ -3,8 +3,11 @@ import sys
 from pathlib import Path
 
 import matplotlib
+from matplotlib.ticker import FormatStrFormatter
 
 matplotlib.use("Agg")
+import os
+import random
 from itertools import chain
 
 import matplotlib.pyplot as plt
@@ -12,15 +15,16 @@ import numpy as np
 import torch
 from matplotlib import gridspec
 from numpy.linalg import qr, svd
+from scipy.linalg import subspace_angles
 
 sys.path.append("../..")
 import warnings
 
-from galerkin import galerkin_Lphi
+from galerkin import eigs
 from sabon.utils import LpLoss, load_model
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-ALPHA = 1.0
+ALPHA = np.float32(1.0)
 
 
 def make_peaks_positive(basis: np.ndarray) -> np.ndarray:
@@ -77,8 +81,8 @@ def plot_bases_heatmaps(
             ax.set_ylabel("Basis index", fontsize=22)
         ax.set_xticks([0, N // 4, N // 2, 3 * N // 4, N - 1])
         ax.set_xticklabels(["0", "π/2", "π", "3π/2", "2π"])
-        ax.set_yticks([0, 9, 19, 29])
-        ax.set_yticklabels([1, 10, 20, 30])
+        ax.set_yticks([0, 9, 18])
+        ax.set_yticklabels([1, 10, 19])
 
     cb = fig.colorbar(im, ax=axes, location="right", shrink=0.9, pad=0.03)
     cb.set_label(r"$\phi_j$", fontsize=18)
@@ -119,13 +123,35 @@ def plot_gram_heatmaps(
             ax.set_ylabel("Basis index", fontsize=22)
 
     cb = fig.colorbar(im, ax=axes, location="right", shrink=0.9, pad=0.03)
-    cb.set_label(r"$G_{kj}$", fontsize=18)
+    cb.set_label(r"$M_{kj}$", fontsize=20)
 
     for ext in formats:
         fn = f"{basename}.{ext}"
         fig.savefig(fn, dpi=dpi, bbox_inches="tight")
         print(f"Saved {fn}")
     plt.close(fig)
+
+
+def rotated_basis_angle(model, grid_xy, alpha, *, make_positive=True, ccw=False):
+    theta = np.arctan2(grid_xy[:, 1], grid_xy[:, 0])
+    if ccw:
+        theta_rot = theta + alpha
+    else:
+        theta_rot = theta - alpha
+    theta_rot %= 2 * np.pi
+
+    rot_xy = np.column_stack((np.cos(theta_rot), np.sin(theta_rot)))
+
+    dev = next(model.parameters()).device
+    rot_t = torch.as_tensor(rot_xy, dtype=torch.float32, device=dev)
+
+    with torch.no_grad():
+        phi_rot = model.Encoder(rot_t).cpu().numpy().T
+
+    if make_positive:
+        phi_rot = make_peaks_positive(phi_rot)
+
+    return phi_rot
 
 
 def plot_predictions_grid(
@@ -293,13 +319,17 @@ def plot_eigenvalue_spectrum(
 
     axPA.scatter(arg_num, abs_num, s=30, c="tab:blue")
     axPA.scatter(arg_lead, abs_lead, s=40, c="tab:red")
-
+    axPA.set_ylim(0, 1 + margin)
     mask_guides = (arg_num < 0) & np.isclose(abs_num, 1.0, atol=0.02)
-    for a in arg_num[mask_guides]:
+    sel_decimals = 2
+    guide_angles = np.unique(np.round(arg_num[mask_guides], sel_decimals))
+    for a in guide_angles:
         axPA.axvline(a, color="tab:green", ls="--", lw=0.8)
 
-    xt_new = sorted(set(chain(axPA.get_xticks(), arg_num[mask_guides])))
+    xt_new = np.sort(np.unique(np.concatenate((axPA.get_xticks(), guide_angles))))
     axPA.set_xticks(xt_new)
+
+    axPA.xaxis.set_major_formatter(FormatStrFormatter("%.3f"))
 
     axPA.set_xlabel(r"Arg$(\lambda)$ (rad)", fontsize=label_fs)
     axPA.set_ylabel(r"$|\lambda|$", fontsize=label_fs)
@@ -339,7 +369,6 @@ def plot_leading_eigenfunctions(
     dpi=1000,
 ):
     lam = np.asarray(galerkin_result["eigenvalues"])
-    V = np.asarray(galerkin_result["eigenvectors"])
     Φ = basis_matrix
     N = Φ.shape[1]
     theta = np.linspace(0, 2 * np.pi, N, endpoint=False)
@@ -350,17 +379,17 @@ def plot_leading_eigenfunctions(
     for ax, n in zip(axes, modes):
         target = np.exp(1j * n)
         idx = np.argmin(np.abs(lam - target))
-        coeffs = V[:, idx]
-        num = coeffs @ Φ
         ana = np.exp(1j * n * theta)
 
+        num = galerkin_result["eigenfunctions"][idx, :]
         num *= np.exp(-1j * np.angle(np.vdot(ana, num)))
         num /= np.abs(num).mean()
 
         ax.plot(theta, num.real, c="tab:red", lw=2, label="Numerical")
         ax.plot(theta, ana.real, c="k", ls="--", lw=3, label=rf"$Re(e^{{{n}i\theta}})$")
         ax.set_ylabel(r"$Re(\psi(\theta))$")
-        ax.set_title(f"k = {n}   (λ ≈ {lam[idx]:.3f})")
+        # compute conjugate to go from alpha 1 to -1
+        ax.set_title(f"k = {n}   (λ ≈ {np.conjugate(lam[idx]):.3f})")
         ax.grid(True, ls=":", lw=0.4)
         ax.legend()
 
@@ -374,23 +403,25 @@ def plot_leading_eigenfunctions(
     plt.close(fig)
 
 
-def _orth(mat: np.ndarray, tol=1e-12):
-    q, r = qr(mat, mode="reduced")
-    return q[:, np.abs(np.diag(r)) > tol]
+def principal_angles(basis1, basis2, tol=1e-12, descending=True):
+    A = np.stack([v for v in basis1], axis=1).astype(np.float64)
+    B = np.stack([v for v in basis2], axis=1).astype(np.float64)
+
+    theta = subspace_angles(A, B)
+
+    if descending:
+        theta = theta[::-1]
+
+    return theta
 
 
-def principal_angles(B1, B2, tol=1e-12):
-    Q1, Q2 = _orth(B1, tol), _orth(B2, tol)
-    s = svd(Q1.T @ Q2, full_matrices=False, compute_uv=False)
-    return np.arccos(np.clip(s, -1, 1))
-
-
-def subspace_distance(B1, B2, metric="largest", tol=1e-12):
-    theta = principal_angles(B1, B2, tol)
+def subspace_distance(B1, B2, metric="geodesic"):
+    theta = principal_angles(B1, B2)
+    sin_th = np.sin(theta)
     return {
-        "largest": theta.max(),
-        "chordal": np.linalg.norm(np.sin(theta)),
-        "projection": np.sin(theta.max()),
+        "geodesic": np.linalg.norm(theta),
+        "chordal": np.linalg.norm(sin_th),
+        "projection": sin_th.max(),
     }[metric]
 
 
@@ -433,9 +464,23 @@ def main():
     yds = []
     titles = []
     lambdas = []
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.use_deterministic_algorithms(True)
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     for sd in subdirs:
         try:
             model, t_in, _, xdata, ydata, cfg = load_model(sd, model_file="best.pth")
+            model.mp_dtype = torch.float32
             ls = cfg.lambda_sparse
             models.append(model)
             tins.append(t_in)
@@ -455,14 +500,15 @@ def main():
         make_peaks_positive(m.Encoder(t.reshape(-1, 2)).detach().cpu().numpy().T)
         for m, t in zip(models, tins)
     ]
-
-    ca, sa = np.cos(ALPHA), np.sin(ALPHA)
-    basis_rot = []
-    for m, t in zip(models, tins):
-        g = t.reshape(-1, 2).cpu().numpy()
-        rot = np.c_[ca * g[:, 0] - sa * g[:, 1], sa * g[:, 0] + ca * g[:, 1]]
-        rot_t = torch.as_tensor(rot, device=t.device)
-        basis_rot.append(make_peaks_positive(m.Encoder(rot_t).detach().cpu().numpy().T))
+    basis_rot = [
+        rotated_basis_angle(
+            m,
+            t.reshape(-1, 2).cpu().numpy(),
+            ALPHA,
+            ccw=False,
+        )
+        for m, t in zip(models, tins)
+    ]
 
     grid = tins[0].reshape(-1, 2).cpu().numpy()
 
@@ -470,8 +516,7 @@ def main():
         basis_in, grid, titles, basename=out_dir / "circle_rotation_basis_functions"
     )
 
-    basis_pruned = remove_low_norm_bases(basis_in, 0.5)
-    basis_norm = normalize_bases(basis_pruned)
+    basis_norm = normalize_bases(basis_in)
     gram_norm = compute_gram_matrices(basis_norm)
     plot_gram_heatmaps(
         gram_norm, titles, basename=out_dir / "circle_rotation_gram_matrix"
@@ -486,21 +531,21 @@ def main():
     )
 
     print("\nSubspace distances  phi ↔ L(phi):")
-    largest = []
+    geodesic = []
     chordal = []
     proj = []
     for tl, B_phi, BL in zip(titles, basis_in, basis_rot):
-        dL = subspace_distance(B_phi, BL, "largest")
+        dL = subspace_distance(B_phi, BL, "geodesic")
         dC = subspace_distance(B_phi, BL, "chordal")
         dP = subspace_distance(B_phi, BL, "projection")
-        largest.append(dL)
+        geodesic.append(dL)
         chordal.append(dC)
         proj.append(dP)
-        print(f"  {tl}: largest={dL:.5e} | chordal={dC:.5e} | projection={dP:.5e}")
+        print(f"  {tl}: geodesic={dL:.5e} | chordal={dC:.5e} | projection={dP:.5e}")
 
     np.savez(
         out_dir / "phi_Lphi_distances.npz",
-        largest=np.array(largest),
+        geodesic=np.array(geodesic),
         chordal=np.array(chordal),
         projection=np.array(proj),
     )
@@ -508,16 +553,15 @@ def main():
 
     idx_spec = int(np.argmax(lambdas))
     spec_model = models[idx_spec]
+    spec_tin = tins[idx_spec]
     phi_rows = basis_in[idx_spec]
 
-    Lphi_rows = np.vstack([apply_operator(spec_model, row) for row in phi_rows])
-
-    phi_cols = [row[:, None] for row in phi_rows]
-    Lphi_cols = [row[:, None] for row in Lphi_rows]
-
     print(f"\nGalerkin spectrum from model {titles[idx_spec]}")
-    result = galerkin_Lphi(
-        phi_cols, Lphi_cols, inner_product_weight=None, normalize_eigenvectors=True
+    result = eigs(
+        spec_model,
+        spec_tin.reshape(-1, 2),
+        normalize_eigenvectors=True,
+        return_left_vectors=True,
     )
 
     plot_eigenvalue_spectrum(

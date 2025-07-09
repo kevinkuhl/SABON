@@ -9,11 +9,13 @@ import numpy as np
 import ot
 import torch
 from matplotlib.patches import Circle
+from scipy.linalg import subspace_angles
 
 sys.path.append("../..")
+import random
 import warnings
 
-from galerkin import galerkin_Lphi, galerkin_phiT
+from galerkin import eigs, galerkin_phiT
 from sabon.utils import load_model
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -84,8 +86,8 @@ def plot_eigenvalues(
 
     ax.axhline(0, color="k", lw=0.5)
     ax.axvline(0, color="k", lw=0.5)
-    ax.set_xlabel(r"$Re(\lambda)$", fontsize=label_fs)
-    ax.set_ylabel(r"$Im(\lambda)$", fontsize=label_fs)
+    ax.set_xlabel(r"Re($\lambda$)", fontsize=label_fs)
+    ax.set_ylabel(r"Im($\lambda$)", fontsize=label_fs)
     ax.set_title("Eigenvalues in the complex plane", fontsize=title_fs)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, ls=":", lw=0.4)
@@ -154,13 +156,15 @@ def cat_map(x, delta=0.01):
     return np.mod(np.stack((y0, y1), axis=-1), 1.0)
 
 
-def principal_angles(basis1, basis2):
-    A = np.hstack([b.ravel(order="F")[:, None] for b in basis1])
-    B = np.hstack([b.ravel(order="F")[:, None] for b in basis2])
-    QA, _ = np.linalg.qr(A)
-    QB, _ = np.linalg.qr(B)
-    s = np.clip(np.linalg.svd(QA.T @ QB, compute_uv=False), 0, 1)
-    return np.sort(np.arccos(s))[::-1]
+def principal_angles(basis1, basis2, descending=True):
+    A = np.stack([v.ravel() for v in basis1], axis=1).astype(np.float64)
+    B = np.stack([v.ravel() for v in basis2], axis=1).astype(np.float64)
+    theta = subspace_angles(A, B)
+
+    if descending:
+        theta = theta[::-1]
+
+    return theta
 
 
 def run_angle(model, t_in, device, out_dir):
@@ -181,6 +185,8 @@ def run_angle(model, t_in, device, out_dir):
 
     n = 14
     B, BT, _, _, _, _ = build_basis_arrays(n, grid_size=100)
+    B = [b.astype(np.float64) for b in B]
+    BT = [b.astype(np.float64) for b in BT]
 
     theta_fourier = principal_angles(B, BT)
     theta_ml = principal_angles(phi, Lphi)
@@ -209,7 +215,6 @@ def run_angle(model, t_in, device, out_dir):
     def distance_metrics(th):
         sin_th = np.sin(th)
         return dict(
-            spectral=th[0],
             projection=sin_th.max(),
             chordal=np.linalg.norm(sin_th),
             geodesic=np.linalg.norm(th),
@@ -249,11 +254,10 @@ def plot_basis_and_gram(model, t_in, out_dir):
     ax.set_xlabel("Basis index", fontsize=20)
     ax.set_ylabel("Basis index", fontsize=20)
     cbar = fig.colorbar(im, ax=ax, location="right", shrink=0.8, pad=0.03)
-    cbar.set_label(r"$G_{kj}$", fontsize=20)
+    cbar.set_label(r"$M_{kj}$", fontsize=20)
     savefig(fig, os.path.join(out_dir, "anosov_gram_matrix"))
 
     H = W = 100
-    order = np.argsort(-norms.ravel())
     sel = [i for i in [0, 50, 100, 150, 200] if i < n]
     patches = B_flat[sel].reshape(len(sel), H, W)
     vmax = np.abs(
@@ -374,11 +378,10 @@ def run_spectrum(model, t_in, device, mu_path, out_dir):
         .reshape(grid_size, grid_size)
         for p in phi
     ]
-    result_ml = galerkin_Lphi(
-        phi,
-        Lphi,
-        inner_product_weight=None,
-        normalize_eigenvectors=False,
+    result_ml = eigs(
+        model,
+        t_in.reshape(-1, 4),
+        normalize_eigenvectors=True,
         return_left_vectors=True,
     )
     fig_ev = plot_eigenvalues(result_ml)
@@ -393,6 +396,9 @@ def run_spectrum(model, t_in, device, mu_path, out_dir):
 
     n_four = 14
     B, BT, W, basis2d, X, m = build_basis_arrays(n_four, grid_size=100)
+    B = [b.astype(np.float64) for b in B]
+    BT = [b.astype(np.float64) for b in BT]
+    W = W.astype(np.float64)
     result_four = galerkin_phiT(
         B,
         BT,
@@ -514,9 +520,25 @@ def main():
     for sub in ("angle", "plots", "spectrum"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
 
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.use_deterministic_algorithms(True)
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     model, t_in, _, x_data, y_data, config = load_model(
         args.checkpoint_dir, model_file="best.pth"
     )
+    model.mp_dtype = torch.float32
+
     device = config.device
     print("Loaded model from", args.checkpoint_dir)
     print("Model config:", config)

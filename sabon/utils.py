@@ -140,17 +140,18 @@ def parse_cli() -> Tuple[str, str, Dict[str, Any]]:
     return args.config, args.save_dir, overrides
 
 
-def load_model(checkpoint_dir: str, model_file: str = "best.pth"):
+def load_model(checkpoint_dir: str, model_file: str = "best.pth", device=None):
     cfg_path = os.path.join(checkpoint_dir, "config.yaml")
     cfg = load_config(cfg_path)
+    device = device if device else cfg.device
 
     grid = np.load(cfg.grid_path)
     grid_flat = grid.reshape(-1, grid.shape[-1])
 
-    t_in = torch.tensor(grid_flat, dtype=torch.float32, device=cfg.device)
+    t_in = torch.tensor(grid_flat, dtype=torch.float32, device=device)
 
-    xdata = torch.tensor(np.load(cfg.x_path), dtype=torch.float32)
-    ydata = torch.tensor(np.load(cfg.y_path), dtype=torch.float32)
+    xdata = torch.tensor(np.load(cfg.x_path), dtype=torch.float32, device=device)
+    ydata = torch.tensor(np.load(cfg.y_path), dtype=torch.float32, device=device)
 
     act_encoder = get_activation(cfg.activation_encoder)
     act_g = get_activation(cfg.activation_g)
@@ -163,9 +164,9 @@ def load_model(checkpoint_dir: str, model_file: str = "best.pth"):
         g_hidden=cfg.g_hidden,
         activation_encoder=act_encoder,
         activation_g=act_g,
-        device=cfg.device,
-    ).to(cfg.device)
+        device=device,
+    ).to(device)
 
-    ckpt = torch.load(os.path.join(checkpoint_dir, model_file), map_location=cfg.device)
+    ckpt = torch.load(os.path.join(checkpoint_dir, model_file), map_location=device)
     model.load_state_dict(ckpt.get("model_state", ckpt), strict=False)
     return model, t_in, grid, xdata, ydata, cfg
