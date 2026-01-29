@@ -1,3 +1,5 @@
+# sabon.py
+
 import math
 import os
 from typing import List, Tuple
@@ -62,11 +64,7 @@ def _select_mp_dtype() -> torch.dtype:
 
 
 def _make_trap_weights(n: int, h: float, device, dtype) -> torch.Tensor:
-    w = torch.ones((n, n), dtype=torch.float32, device=device)
-    w[[0, -1], :] *= 0.5
-    w[:, [0, -1]] *= 0.5
-    w[0, 0] = w[0, -1] = w[-1, 0] = w[-1, -1] = 0.25
-    w *= h * h
+    w = torch.full((n, n), h * h, dtype=torch.float32, device=device)
     return w.to(dtype).flatten()
 
 
@@ -108,7 +106,7 @@ class SABON(nn.Module):
         )
 
         n_pts = int(math.sqrt(grid_in.shape[0]))
-        h = trap_step if trap_step is not None else (2.0 * math.pi / n_pts)
+        h = trap_step if trap_step is not None else (1.0 / n_pts)
         self.register_buffer(
             "trap_w_flat", _make_trap_weights(n_pts, h, self._device, self.mp_dtype)
         )
@@ -130,8 +128,40 @@ class SABON(nn.Module):
 
         self.to(self._device)
 
+    def get_bases(self) -> torch.Tensor:
+        """
+        Get current basis functions.
+
+        Returns:
+            bases: (n_basis, L) tensor of basis functions evaluated on grid
+        """
+        return self.Encoder(self.t_in).T.contiguous()
+
+    def project(self, x_flat: torch.Tensor, bases: torch.Tensor = None) -> torch.Tensor:
+        """Project functions onto the learned basis."""
+        if bases is None:
+            bases = self.get_bases()
+        bases_w = bases * self.trap_w_flat
+        return _project_flat(x_flat, bases_w)
+
+    def reconstruct(
+        self, coeffs: torch.Tensor, bases: torch.Tensor = None
+    ) -> torch.Tensor:
+        """Reconstruct functions from coefficients."""
+        if bases is None:
+            bases = self.get_bases()
+        return _reconstruct_flat(coeffs, bases)
+
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        """out_flat, aec_in_flat, aec_out_flat, bases_flat"""
+        """
+        Full forward pass.
+
+        Returns:
+            out_flat: (batch, L) predicted L(x)
+            aec_in_flat: (batch, L) reconstructed x
+            aec_out_flat: (batch, L) reconstructed y
+            bases: (n_basis, L) basis functions
+        """
         dev = self.t_in.device
         x = x.to(dev)
         y = y.to(dev)
@@ -143,19 +173,21 @@ class SABON(nn.Module):
             B_out = y.size(0)
             L = J1 * J2
 
-            bases_f32 = self.Encoder(self.t_in).T.contiguous()
+            # Get basis
+            bases_f32 = self.get_bases()
             bases_mp = bases_f32.to(self.mp_dtype)
-            bases_w_flat = bases_mp * self.trap_w_flat
 
+            # Project and reconstruct
             x_flat_mp = x.view(B_in, L).to(self.mp_dtype)
-            s_in = _project_flat(x_flat_mp, bases_w_flat)
+            s_in = self.project(x_flat_mp, bases_mp)
             s_out_mp = self.G(s_in.float()).to(self.mp_dtype)
 
-            out_flat_mp = _reconstruct_flat(s_out_mp, bases_mp)
-            aec_in_flat_mp = _reconstruct_flat(s_in, bases_mp)
+            out_flat_mp = self.reconstruct(s_out_mp, bases_mp)
+            aec_in_flat_mp = self.reconstruct(s_in, bases_mp)
+
             y_flat_mp = y.view(B_out, L).to(self.mp_dtype)
-            s_y = _project_flat(y_flat_mp, bases_w_flat)
-            aec_out_flat_mp = _reconstruct_flat(s_y, bases_mp)
+            s_y = self.project(y_flat_mp, bases_mp)
+            aec_out_flat_mp = self.reconstruct(s_y, bases_mp)
 
         return (
             out_flat_mp.float(),
@@ -163,6 +195,35 @@ class SABON(nn.Module):
             aec_out_flat_mp.float(),
             bases_f32.float(),
         )
+
+    def predict_k_steps(
+        self, x_flat: torch.Tensor, k: int, bases: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Apply the learned operator k times.
+
+        Computes: reconstruct(G^k(project(x)))
+
+        Args:
+            x_flat: (batch, L) input functions
+            k: number of steps
+            bases: (n_basis, L) basis functions. If None, computed from Encoder.
+
+        Returns:
+            out_flat: (batch, L) predicted L^k(x)
+        """
+        if bases is None:
+            bases = self.get_bases()
+
+        # Project
+        coeffs = self.project(x_flat, bases)
+
+        # Apply G k times
+        for _ in range(k):
+            coeffs = self.G(coeffs)
+
+        # Reconstruct
+        return self.reconstruct(coeffs, bases)
 
     def load_ckpt(
         self,

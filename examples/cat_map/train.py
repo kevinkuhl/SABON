@@ -1,11 +1,3 @@
-"""
-Usage
------
-python train.py                              # defaults: config.yaml, ./checkpoints
-python train.py --config run.yaml            # custom YAML
-python train.py --config run.yaml --save_dir ./my_checkpoints
-"""
-
 import os
 import sys
 import time
@@ -79,6 +71,11 @@ def train(
     for k, v in override.items():
         setattr(cfg, k, v)
 
+    if not hasattr(cfg, "k_iterate"):
+        cfg.k_iterate = 1
+    if not hasattr(cfg, "y_k_path"):
+        cfg.y_k_path = cfg.y_path.replace("ydata.npy", f"ydata_k{cfg.k_iterate}.npy")
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(save_dir, f"{cfg.model_name}_{ts}")
     os.makedirs(run_dir, exist_ok=True)
@@ -91,6 +88,12 @@ def train(
 
     x = np.load(cfg.x_path)
     y = np.load(cfg.y_path)
+    if cfg.k_iterate > 1:
+        y_k = np.load(cfg.y_k_path)
+        logger.log(f"Loaded {cfg.k_iterate}-step iterate from {cfg.y_k_path}")
+    else:
+        y_k = y
+        logger.log("k_iterate=1, using 1-step data")
     grid = np.load(cfg.grid_path)
     grid = grid[:: cfg.sub, :: cfg.sub, :]
     grid_flat = grid.reshape(-1, grid.shape[-1])
@@ -98,12 +101,7 @@ def train(
     ntr, nval, nte = cfg.ntrain, cfg.nvalid, cfg.ntest
     x_tr, x_va, x_te = np.split(x, [ntr, ntr + nval])
     y_tr, y_va, y_te = np.split(y, [ntr, ntr + nval])
-
-    if cfg.linear_augment:
-        x_tr, y_tr = linear_augmentation(
-            ntr, cfg.linear_augment_percentage, x_tr, y_tr, cfg.random_seed
-        )
-        ntr = x_tr.shape[0]
+    y_k_tr, y_k_va, y_k_te = np.split(y_k, [ntr, ntr + nval])
 
     x_tr = torch.from_numpy(x_tr).float()
     x_va = torch.from_numpy(x_va).float()
@@ -111,6 +109,9 @@ def train(
     y_tr = torch.from_numpy(y_tr).float()
     y_va = torch.from_numpy(y_va).float()
     y_te = torch.from_numpy(y_te).float()
+    y_k_tr = torch.from_numpy(y_k_tr).float()
+    y_k_va = torch.from_numpy(y_k_va).float()
+    y_k_te = torch.from_numpy(y_k_te).float()
 
     J1, J2 = y_tr.shape[1:3]
     Ldim = J1 * J2
@@ -122,10 +123,10 @@ def train(
         A_hat = (LF @ torch.linalg.pinv(F)).to(device)
 
     tr_loader = DataLoader(
-        TensorDataset(x_tr, y_tr), batch_size=cfg.batch_size, shuffle=True
+        TensorDataset(x_tr, y_tr, y_k_tr), batch_size=cfg.batch_size, shuffle=True
     )
-    va_loader = DataLoader(TensorDataset(x_va, y_va), batch_size=cfg.batch_size)
-    te_loader = DataLoader(TensorDataset(x_te, y_te), batch_size=cfg.batch_size)
+    va_loader = DataLoader(TensorDataset(x_va, y_va, y_k_va), batch_size=cfg.batch_size)
+    te_loader = DataLoader(TensorDataset(x_te, y_te, y_k_te), batch_size=cfg.batch_size)
 
     act_encoder = get_activation(cfg.activation_encoder)
     act_g = get_activation(cfg.activation_g)
@@ -158,14 +159,14 @@ def train(
         t0 = time.time()
         tr_tot = tr_op = tr_aec_in = tr_aec_out = tr_inv = 0.0
 
-        for xb, yb in tr_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            out, a_in, a_out, bases = model(xb, yb)
+        for xb, yb, yb_k in tr_loader:
+            xb, yb, yb_k = xb.to(device), yb.to(device), yb_k.to(device)
+            out, a_in, a_out, bases = model(xb, yb_k)
 
             inv_loss = _invariance_loss(bases, model.trap_w_flat, A_hat)
             op_loss = rel_loss(out, yb.view(-1, Ldim))
             a_in_loss = rel_loss(a_in, xb)
-            a_out_loss = rel_loss(a_out, yb)
+            a_out_loss = rel_loss(a_out, yb_k)
             sp_loss = torch.norm(bases, 1, 1).mean()
 
             loss = (
@@ -197,14 +198,14 @@ def train(
         model.eval()
         va_tot = va_op = va_aec_in = va_aec_out = va_inv = 0.0
         with torch.no_grad():
-            for xb, yb in va_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                out, a_in, a_out, bases = model(xb, yb)
+            for xb, yb, yb_k in va_loader:
+                xb, yb, yb_k = xb.to(device), yb.to(device), yb_k.to(device)
+                out, a_in, a_out, bases = model(xb, yb_k)
 
                 inv_loss = _invariance_loss(bases, model.trap_w_flat, A_hat)
                 op_loss = rel_loss(out, yb.view(-1, Ldim))
                 a_in_loss = rel_loss(a_in, xb)
-                a_out_loss = rel_loss(a_out, yb)
+                a_out_loss = rel_loss(a_out, yb_k)
                 sp_loss = torch.norm(bases, 1, 1).mean()
 
                 loss = (
@@ -235,8 +236,8 @@ def train(
             f"valid_aec_out:{va_aec_out:.7f} | valid_inv:{va_inv:.7f} | nbasis:{model.nbasis}"
         )
 
-        if va_op < best_val:
-            best_val = va_op
+        if va_tot < best_val:
+            best_val = va_tot
             torch.save(
                 {
                     "model_state": model.state_dict(),
@@ -251,9 +252,9 @@ def train(
     model.eval()
     mse_op = 0.0
     with torch.no_grad():
-        for xb, yb in te_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            out, _, _, _ = model(xb, yb)
+        for xb, yb, yb_k in te_loader:
+            xb, yb, yb_k = xb.to(device), yb.to(device), yb_k.to(device)
+            out, _, _, _ = model(xb, yb_k)
             mse_op += mse_loss(out, yb.view(-1, Ldim)).item()
     mse_op /= nte
     logger.log(f"test_mse_op:{mse_op:.6e}")

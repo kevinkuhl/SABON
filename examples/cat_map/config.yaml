@@ -1,10 +1,10 @@
 # Training/validation split
-ntrain: 3000
+ntrain: 4000
 nvalid: 500
 ntest: 500
 
 # Model architecture
-nbasis: 225
+nbasis: 686
 encoder_hidden: [2048, 2048, 2048, 2048, 2048]
 g_hidden: []
 
@@ -12,7 +12,7 @@ g_hidden: []
 batch_size: 100
 sub: 1
 learning_rate: 0.001
-epochs: 4500
+epochs: 7500
 scheduler_step_size: 250
 gamma: 0.9
 
@@ -22,17 +22,15 @@ activation_g: identity
 
 # Regularisation / constraints
 lambda_in: 0.0
-lambda_out: 0.0
+lambda_out: 0.6
 lambda_sparse: 0.0
 lambda_inv: 0.0
 lambda_op: 1.0
 
-# Data augmentation
-linear_augment: false
-linear_augment_percentage: 0.6
-random_seed: 1
+k_iterate: 2
+random_seed: 42
 
-base_path: /srv/scratch/z5547452/data_cat_map/TO_perturbed_cat_map_4D-4000fs-100ps-5or
+base_path: /cat_map/data/conjugated/Conjugated_TO_JAX-5000fs-100ps-4or-k2
 
 # Runtime
 model_name: SABON

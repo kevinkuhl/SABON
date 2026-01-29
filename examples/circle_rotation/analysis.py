@@ -75,17 +75,17 @@ def plot_bases_heatmaps(
         im = ax.imshow(
             mat, cmap=cmap, vmin=vmin, vmax=vmax, origin="lower", aspect="auto"
         )
-        ax.set_title(tl, fontsize=22)
-        ax.set_xlabel(r"$\theta$ (grid points)", fontsize=22)
+        ax.set_title(tl, fontsize=25)
+        ax.set_xlabel(r"$\theta$ (grid points)", fontsize=25)
         if ax is axes[0]:
-            ax.set_ylabel("Basis index", fontsize=22)
+            ax.set_ylabel("Basis index j", fontsize=25)
         ax.set_xticks([0, N // 4, N // 2, 3 * N // 4, N - 1])
-        ax.set_xticklabels(["0", "π/2", "π", "3π/2", "2π"])
+        ax.set_xticklabels(["0", "π/2", "π", "3π/2", "2π"], fontsize=18)
         ax.set_yticks([0, 9, 18])
-        ax.set_yticklabels([1, 10, 19])
+        ax.set_yticklabels([1, 10, 19], fontsize=18)
 
     cb = fig.colorbar(im, ax=axes, location="right", shrink=0.9, pad=0.03)
-    cb.set_label(r"$\phi_j$", fontsize=18)
+    cb.set_label(r"Basis value ($\phi_j$)", fontsize=30)
 
     for ext in formats:
         fn = f"{basename}.{ext}"
@@ -511,9 +511,10 @@ def main():
     ]
 
     grid = tins[0].reshape(-1, 2).cpu().numpy()
+    basis_norm = normalize_bases(basis_in)
 
     plot_bases_heatmaps(
-        basis_in, grid, titles, basename=out_dir / "circle_rotation_basis_functions"
+        basis_norm, grid, titles, basename=out_dir / "circle_rotation_basis_functions"
     )
 
     basis_norm = normalize_bases(basis_in)
