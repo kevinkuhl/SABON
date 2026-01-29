@@ -40,7 +40,10 @@ cd examples/circle_rotation
 
 # 1) generate data
 python data.py \
-  --n_functions 1000 --n_points 100 --max_order 9 --alpha 1 \
+  --n_functions 1000 \
+  --n_points 100 \
+  --max_order 9 \
+  --alpha 1 \
   --saving_directory ./data
 
 # 2) train
@@ -59,15 +62,24 @@ python analysis.py \
 ```bash
 cd examples/cat_map
 
+# 1) generate data
 python data.py \
-  --n_functions 4000 --n_points 100 --max_order 5 \
+  --n_functions 4000 \
+  --n_points 100 \
+  --max_order 5 \
+  --k_iterate 1 \
+  --delta 0.01 \
+  --a 0.1 \
+  --b 0.1 \
   --saving_directory ./data
 
+# 2) train
 python train.py \
   --config ./config.yaml \
   --save_dir ./checkpoints
 
+# 3) analyse results
 python analysis.py \
   --checkpoint_dir ./checkpoints \
-  --output_dir   ./results
+  --output_dir ./results
 ```
